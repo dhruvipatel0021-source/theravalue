@@ -3,16 +3,37 @@ import pandas as pd
 import plotly.express as px
 import json
 from engine import search_pubmed, incremental
+from ai import plan, extract
 st.set_page_config(page_title='TheraValue | Research workspace',layout='wide',page_icon='📊')
-st.markdown('''<style> .block-container{max-width:1180px;padding-top:2rem} [data-testid="stMetric"]{border:1px solid #dce5eb;border-radius:10px;padding:15px} h1,h2,h3{letter-spacing:-.025em} </style>''',unsafe_allow_html=True)
+st.markdown("""<style>
+.stApp {background:#f4f7fa;color:#132f43} .block-container{max-width:1250px;padding-top:2.4rem;padding-bottom:3rem} [data-testid="stSidebar"]{background:#e8eff4} h1,h2,h3{color:#132f43;letter-spacing:-.035em} h1{font-size:2rem} h2{font-size:1.4rem} h3{font-size:1.15rem} [data-testid="stMetric"], [data-testid="stVerticalBlockBorderWrapper"]{background:white;border-radius:14px} .hero{background:linear-gradient(115deg,#132f43,#235e69);color:white;padding:30px;border-radius:18px;margin-bottom:22px} .hero h1{color:white;margin:0;font-size:2.1rem} .hero p{color:#d4e7ed;margin:8px 0 0} .eyebrow{font-size:11px;letter-spacing:2px;font-weight:700;color:#287f77} .hero .eyebrow{color:#9bd9ce} .stButton button[kind="primary"]{background:#287f77;border-color:#287f77;color:white} [data-testid="stSidebar"] button{width:100%;text-align:left;justify-content:flex-start;border-radius:9px} </style>""",unsafe_allow_html=True)
 PAGES=['Overview','HEOR & Formulary','Clinical Review','Evidence Library','My Assessments','Methodology']
-for k,v in {'page':'Overview','reports':[],'papers':[]}.items():
+for k,v in {'page':'Overview','reports':[],'papers':[],'extractions':{},'search_terms':'','plan':None}.items():
     if k not in st.session_state:st.session_state[k]=v
-st.sidebar.markdown('## TheraValue\nEvidence & Value Intelligence')
-page=st.sidebar.radio('Workspace',PAGES,key='page')
-st.sidebar.caption('Research edition · Type 2 diabetes')
-st.sidebar.caption('Not for clinical prescribing. Do not enter identifiable patient information.')
+try: KEY=st.secrets.get('GROQ_API_KEY','')
+except Exception: KEY=''
 def go(p):st.session_state.page=p
+st.sidebar.markdown('### TheraValue\n\nEvidence & value intelligence')
+st.sidebar.caption('WORKSPACE')
+for i,p in enumerate(PAGES):
+    if i==3: st.sidebar.caption('RESOURCES')
+    st.sidebar.button(p,key='nav'+str(i),on_click=go,args=(p,),type='primary' if st.session_state.page==p else 'secondary',use_container_width=True)
+st.sidebar.divider();st.sidebar.caption('Research edition · Type 2 diabetes');st.sidebar.caption('AI key configured' if KEY else 'AI key not configured');st.sidebar.caption('Research only. No identifiable patient information.')
+page=st.session_state.page
+
+def assistant():
+    q=st.text_area('Research question (no patient identifiers)',placeholder='Compare tirzepatide and semaglutide for glycemic outcomes in adults with type 2 diabetes.')
+    if st.button('Prepare evidence search',type='primary',disabled=not q.strip()):
+        try:
+            with st.spinner('Preparing search strategy…'): st.session_state.plan=plan(KEY,q)
+        except Exception as e: st.error(str(e))
+    p=st.session_state.plan
+    if p:
+        st.write(p.get('scope',''))
+        for f in p.get('follow_up',[]): st.write('• '+str(f))
+        terms=st.text_input('Review or refine PubMed query',value=str(p.get('search_terms','')))
+        if st.button('Use query in evidence search'):
+            st.session_state.search_terms=terms;st.session_state.page='Evidence Library';st.rerun()
 
 def trial():
     df=pd.DataFrame({'Treatment':['Tirzepatide 5 mg','Tirzepatide 10 mg','Tirzepatide 15 mg','Semaglutide 1 mg'],'HbA1c reduction (pp)':[2.01,2.24,2.30,1.86]})
@@ -22,25 +43,36 @@ def trial():
     return df
 
 def search():
-    q=st.text_input('Research question or PubMed search terms',placeholder='e.g. cardiovascular outcomes')
+    q=st.text_input('PubMed search terms',value=st.session_state.search_terms,placeholder='e.g. cardiovascular outcomes')
     if st.button('Search PubMed',type='primary',disabled=not q.strip()):
         try:
             with st.spinner('Retrieving publications…'):st.session_state.papers=search_pubmed(q)
             if not st.session_state.papers:st.info('No matching publications found.')
-        except Exception as e:st.error('PubMed retrieval failed. Please retry. '+str(e))
+        except Exception:st.error('PubMed retrieval failed. Please retry.')
     for p in st.session_state.papers:
         with st.expander(p['Title']):
-            st.write(p['Abstract'] or 'Abstract unavailable.');st.markdown(f"[Original source]({p['URL']})")
+            st.caption('PMID '+p['PMID']);st.write(p['Abstract'] or 'Abstract unavailable.');st.markdown(f"[Original source]({p['URL']})")
+            if st.button('Extract evidence with AI',key='extract'+p['PMID'],disabled=not bool(p['Abstract'])):
+                try:
+                    with st.spinner('Extracting abstract evidence…'):st.session_state.extractions[p['PMID']]=extract(KEY,p)
+                except Exception as e:st.error(str(e))
+            if p['PMID'] in st.session_state.extractions:
+                df=pd.DataFrame(st.session_state.extractions[p['PMID']]);st.dataframe(df,use_container_width=True,hide_index=True);st.caption('Exact passage matching is not scientific verification. Review against full text.');st.download_button('Export draft extraction',df.assign(PMID=p['PMID'],URL=p['URL']).to_csv(index=False),f"extraction_{p['PMID']}.csv",key='dl'+p['PMID'])
     if st.session_state.papers:st.download_button('Export retrieved records',pd.DataFrame(st.session_state.papers).to_csv(index=False),'pubmed_records.csv','text/csv')
 
 if page=='Overview':
-    st.title('Evidence & value workspace');st.write('Evaluate clinical evidence and medication expenditure in one research workspace.')
+    st.markdown('<div class="hero"><div class="eyebrow">RESEARCH EDITION / TYPE 2 DIABETES</div><h1>Evidence &amp; value intelligence</h1><p>Connect clinical evidence with transparent economic analysis.</p></div>',unsafe_allow_html=True)
+    with st.container(border=True):
+        st.subheader('AI-assisted research');assistant()
     a,b=st.columns(2)
     with a:
-        st.subheader('HEOR & Formulary Research');st.write('Retrieve evidence and evaluate clinical-economic trade-offs.');st.button('Start research assessment',on_click=go,args=('HEOR & Formulary',),type='primary')
+        with st.container(border=True):
+            st.subheader('HEOR & Formulary');st.write('Compare published outcomes, medication costs and expenditure scenarios.');st.button('Open research workspace',on_click=go,args=('HEOR & Formulary',),type='primary')
     with b:
-        st.subheader('Clinical Decision Review');st.write('Identify evidence and information required for a treatment review.');st.button('Start clinical review',on_click=go,args=('Clinical Review',))
-    st.divider();st.caption('Current scope: GLP-1–based therapies in adults with type 2 diabetes.')
+        with st.container(border=True):
+            st.subheader('Clinical Review');st.write('Frame clinical questions and retrieve supporting evidence.');st.button('Open clinical workspace',on_click=go,args=('Clinical Review',))
+    with st.container(border=True):
+        st.subheader('Research spotlight');trial()
 elif page=='HEOR & Formulary':
     st.title('Research assessment');task=st.selectbox('Assessment objective',['Literature review','Trial-based economic analysis','Pharmacy expenditure scenario'])
     if task=='Literature review':search()
@@ -67,14 +99,16 @@ elif page=='HEOR & Formulary':
             base=n*a;future=n*((1-s/100)*a+s/100*b);st.metric('Annual expenditure change',f'${future-base:,.2f}');st.plotly_chart(px.bar(pd.DataFrame({'Scenario':['Current','Proposed'],'Annual expenditure ($)':[base,future]}),x='Scenario',y='Annual expenditure ($)',color_discrete_sequence=['#24796f']),use_container_width=True)
             st.caption('Assumes all patients initially receive the current therapy; excludes medical offsets and discontinuation.')
 elif page=='Clinical Review':
-    st.title('Clinical decision review');st.info('Initial version: evidence retrieval only. Validated clinical rules and insurance records are not yet connected.')
-    search()
+    st.title('Clinical decision review');st.caption('Research support only; validated clinical rules and insurance records are not connected.')
+    assistant()
 elif page=='Evidence Library':
-    st.title('Evidence library');trial();st.caption('Additional verified evidence records will be imported after workbook review.')
+    st.title('Evidence library');t1,t2=st.tabs(['Live literature','Published trial example'])
+    with t1: search()
+    with t2: trial()
 elif page=='My Assessments':
     st.title('My assessments');st.caption('Session storage only; export before closing the application.')
     if not st.session_state.reports:st.info('No saved assessments yet.')
     for i,r in enumerate(st.session_state.reports):
         with st.expander(f"Assessment {i+1} · {r['type']}"):st.json(r);st.download_button('Export JSON',json.dumps(r,indent=2),f'assessment_{i+1}.json',key=f'export{i}')
 else:
-    st.title('Methodology');st.write('Published study-level evidence; deterministic medication expenditure calculations; documented user-entered cost inputs.');st.markdown('[SURPASS-2](https://pubmed.ncbi.nlm.nih.gov/34170647/) · [PubMed E-utilities](https://www.ncbi.nlm.nih.gov/books/NBK25501/)');st.warning('Research prototype. AI extraction, compatibility engine, verified insurance database, persistent storage and formal validation are pending.')
+    st.title('Methodology');st.write('Published study-level evidence; deterministic medication expenditure calculations; documented user-entered cost inputs.');st.markdown('[SURPASS-2](https://pubmed.ncbi.nlm.nih.gov/34170647/) · [PubMed E-utilities](https://www.ncbi.nlm.nih.gov/books/NBK25501/)');st.warning('Research prototype. Formal AI extraction validation, compatibility engine, verified insurance database, persistent storage and formal validation are pending.')
