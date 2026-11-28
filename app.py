@@ -27,7 +27,7 @@ def retrieve(w,key,default='',objective=0):
     st.subheader('Find relevant studies')
     q=st.text_area('Research question or PMID',value=default,placeholder=EX[objective],key=key+'q')
     if st.button('Find studies',key=key+'search',type='primary',disabled=not q.strip()):
-        w.update(papers=[],rows=[],audit=[],notes=[],question=q)
+        w.update(papers=[],rows=[],audit=[],notes=[],question=q);w.pop('economic_result',None);w.pop('budget_result',None);w.pop('brief',None)
         try:
             with st.spinner('Planning and screening literature…'):
                 terms=build_query(q)
@@ -122,7 +122,7 @@ def review(w,key):
             if x.button('Accept reviewed results in this study',key=key+'studyaccept'+pmid):
                 for i in indices:
                     r=rows[i]
-                    if r['decision']=='Pending' and r['check'] in ['Number located','Arithmetic consistent'] and not r.get('comparator_inferred'):r['decision']='Confirm'
+                    if r['decision']=='Pending' and r['check'] in ['Number located','Arithmetic consistent'] and not r.get('comparator_inferred') and (r.get('measure')!='between-arm difference' or r.get('comparator')):r['decision']='Confirm'
                 st.rerun()
             if y.button('Exclude entire study',key=key+'studyreject'+pmid):
                 for i in indices:rows[i]['decision']='Exclude'
@@ -133,10 +133,10 @@ def review(w,key):
         with st.expander('Source text'):st.text(r['source_text'])
         with st.expander('Correct evidence / advanced methodology'):
             with st.form(key+f'correct{idx}'):
-                val=st.number_input('Correct value',value=float(r['value']));unit=st.text_input('Unit',value=str(r.get('unit') or ''));arm=st.text_input('Treatment arm',value=str(r.get('arm') or ''));group=st.text_input('Randomized comparison group',value=str(r.get('comparison_group') or 'unknown'));est=st.text_input('Reported estimand',value=str(r.get('estimand') or 'unknown'));quote=st.text_area('Supporting passage',value=r.get('quote') or '');ref=st.text_input('Source location / methods citation',value=r.get('manual_reference',''));attest=st.checkbox('I checked the original publication and confirm the corrected fields')
+                val=st.number_input('Correct value',value=float(r['value']));unit=st.text_input('Unit',value=str(r.get('unit') or ''));arm=st.text_input('Treatment arm',value=str(r.get('arm') or ''));comparator=st.text_input('Explicit comparator (for between-arm differences)',value=str(r.get('comparator') or ''));group=st.text_input('Randomized comparison group',value=str(r.get('comparison_group') or 'unknown'));est=st.text_input('Reported estimand',value=str(r.get('estimand') or 'unknown'));quote=st.text_area('Supporting passage',value=r.get('quote') or '');ref=st.text_input('Source location / methods citation',value=r.get('manual_reference',''));attest=st.checkbox('I checked the original publication and confirm the corrected fields')
                 if st.form_submit_button('Save correction'):
                     if not (quote.strip() and ref.strip() and attest):st.error('Document source and confirm review.')
-                    else:r.update(value=val,unit=unit,arm=arm,comparison_group=group,estimand=est,quote=quote,manual_reference=ref,manual_verified=True,decision='Confirm',check='Manually documented');st.rerun()
+                    else:r.update(value=val,unit=unit,arm=arm,comparator=comparator or None,comparison_group=group,estimand=est,quote=quote,manual_reference=ref,manual_verified=True,decision='Confirm',check='Manually documented');st.rerun()
     valid=[r for r in rows if r['decision']=='Confirm' and (r['check'] in ['Number located','Arithmetic consistent'] or r.get('manual_verified'))]
     st.metric('Confirmed usable results',len(valid));st.caption('Unresolved source checks require documented correction before use.')
     st.download_button('Export draft and review decisions',pd.DataFrame(rows).drop(columns=['source_text'],errors='ignore').to_csv(index=False),key+'.csv',key=key+'csv')
@@ -169,6 +169,11 @@ def clinical_results(w,key):
     st.caption('Study-level descriptive results only; no cross-trial pooling. Between-arm estimates are separate from baseline changes.')
     return rows,pairs
 def economics(w,key,pairs):
+    w.pop("economic_result",None)
+    published=[r for r in w.get("verified",[]) if any(x in str(r.get("outcome")).lower() for x in ("cost","icer","qaly","budget"))]
+    st.subheader("Published economic evidence")
+    if published:st.dataframe(pd.DataFrame(published).reindex(columns=["PMID","arm","outcome","value","unit","perspective","price_year"]),hide_index=True)
+    else:st.caption("No verified published economic estimates in this assessment.")
     st.subheader('Medication cost per additional HbA1c reduction')
     pairs=[(a,b) for a,b in pairs if compatible(a,b) and a['outcome']=='HbA1c' and a['unit']=='pp' and a.get('estimand') not in ('unknown',None,'') and a.get('manual_reference') and b.get('manual_reference')]
     if not pairs:
@@ -180,19 +185,22 @@ def economics(w,key,pairs):
         a,b=st.columns(2);ca=a.number_input(r['arm']+' supply cost ($)',min_value=0.,value=None);cb=b.number_input(r['comparator']+' supply cost ($)',min_value=0.,value=None);da=a.number_input('Intervention supply days',min_value=1,value=28);db=b.number_input('Comparator supply days',min_value=1,value=28)
         src=st.text_input('Cost source, date and USD year');ok=st.checkbox('I verified the reported randomized contrast, its analysis method and comparable cost inputs')
         if ca is not None and cb is not None and src and ok:
-            result=incremental(ca,cb,da,db,r['weeks'],-r['value']);st.dataframe(pd.DataFrame([result]),hide_index=True);st.caption('Trial-duration medication-only scenario, not full cost-effectiveness or cost-utility analysis.')
+            result=incremental(ca,cb,da,db,r['weeks'],-r['value']);w["economic_result"]=dict(results=result,basis=basis,source=src,costs=[ca,cb,da,db],evidence=r if "r" in locals() else [a,b]);st.dataframe(pd.DataFrame([result]),hide_index=True);st.caption('Trial-duration medication-only scenario, not full cost-effectiveness or cost-utility analysis.')
             if st.button('Save economic assessment'):save('Economic assessment',dict(results=result,evidence=r,source=src,basis=basis,costs=[ca,cb,da,db]))
         return
     a,b=st.selectbox('Comparison',pairs,format_func=lambda p:p[0]['arm']+' vs '+p[1]['arm'],key=key+'pair');basis=st.selectbox('Cost basis',['Payer net cost','Acquisition benchmark','Cash price','Patient out-of-pocket'],key=key+'basis');ca=st.number_input('First treatment supply cost ($)',min_value=0.,value=None);cb=st.number_input('Second treatment supply cost ($)',min_value=0.,value=None);da=st.number_input('First supply days',min_value=1,value=28);db=st.number_input('Second supply days',min_value=1,value=28);src=st.text_input('Dose-specific cost sources, dates and USD year');ok=st.checkbox('Confirm comparable cost basis and documented inputs')
     if ca is not None and cb is not None and src and ok:
         if b['value']<a['value']:a,b=b,a;ca,cb=cb,ca;da,db=db,da
-        result=incremental(ca,cb,da,db,a['weeks'],b['value']-a['value']);st.dataframe(pd.DataFrame([result]),hide_index=True);st.caption('Medication-only, constant price and full persistence; not a QALY-based analysis.')
+        result=incremental(ca,cb,da,db,a['weeks'],b['value']-a['value']);w["economic_result"]=dict(results=result,basis=basis,source=src,costs=[ca,cb,da,db],evidence=r if "r" in locals() else [a,b]);st.dataframe(pd.DataFrame([result]),hide_index=True);st.caption('Medication-only, constant price and full persistence; not a QALY-based analysis.')
         if st.button('Save economic assessment'):save('Economic assessment',dict(results=result,evidence=[a,b],source=src,basis=basis,costs=[ca,cb,da,db]))
-def budget():
+def budget(w=None):
+    if w is not None:w.pop("budget_result",None)
     st.header('Pharmacy budget impact');st.caption('Medication-only scenario; no literature search required.')
     a,b=st.columns(2);old=a.text_input('Current treatment');new=b.text_input('Alternative treatment');ca=a.number_input('Current supply cost ($)',min_value=0.,value=None);cb=b.number_input('Alternative supply cost ($)',min_value=0.,value=None);da=a.number_input('Current supply days',min_value=1,value=28);db=b.number_input('Alternative supply days',min_value=1,value=28);n=st.number_input('Eligible patients',min_value=1,value=None);u=st.slider('Switching proportion (%)',0,100,0);y=st.selectbox('Years',[1,2,3,5]);src=st.text_input('Cost sources, perspective, date and USD year')
     if None not in (ca,cb,n) and src and old and new:
-        r=budget_model(n,ca,cb,da,db,u,y);st.metric('Expenditure change',f"${r['Change']:,.0f}");st.plotly_chart(px.bar(x=['Current','Scenario'],y=[r['Current expenditure'],r['Scenario expenditure']],labels={'x':'Scenario','y':'USD'},color_discrete_sequence=['#287f77']),use_container_width=True);st.caption('Constant population, prices, switching proportion and full persistence; excludes other medical costs.')
+        r=budget_model(n,ca,cb,da,db,u,y);
+        if w is not None:w['budget_result']=dict(results=r,inputs=[old,new,ca,cb,da,db,n,u,y,src])
+        st.metric('Expenditure change',f"${r['Change']:,.0f}");st.plotly_chart(px.bar(x=['Current','Scenario'],y=[r['Current expenditure'],r['Scenario expenditure']],labels={'x':'Scenario','y':'USD'},color_discrete_sequence=['#287f77']),use_container_width=True);st.caption('Constant population, prices, switching proportion and full persistence; excludes other medical costs.')
         st.plotly_chart(px.line(pd.DataFrame([{'Switching (%)':x,'Expenditure change ($)':budget_model(n,ca,cb,da,db,x,y)['Change']} for x in range(0,101,5)]),x='Switching (%)',y='Expenditure change ($)',title='Sensitivity to treatment uptake'),use_container_width=True)
         if st.button('Save budget scenario'):save('Budget scenario',dict(results=r,inputs=[old,new,ca,cb,da,db,n,u,y,src]))
 def clinical_assessment(w,rows,pairs):
@@ -248,9 +256,35 @@ if S.page=='Overview':
                 with st.container(border=True):st.subheader(OBJ[i]);st.caption(EX[i]);st.button('Start assessment →',key='home'+str(i),on_click=launch,args=(i,))
     st.button('Review a clinical case →',on_click=go,args=('Clinical Review',),type='primary')
 elif S.page==PAGES[1]:
-    st.title(PAGES[1]);i=st.radio('Assessment objective',range(4),index=S.objective,format_func=lambda i:OBJ[i],horizontal=True);S.objective=i
-    if i==2:budget()
-    else:workflow(workspace('heor'+str(i)),'heor'+str(i),i)
+    st.title(PAGES[1]);w=workspace('heor_shared')
+    st.caption('One evidence review, four distinct decision outputs.')
+    if w['stage']<2:
+        if st.button('Open standalone budget calculator') :w['standalone_budget']=not w.get('standalone_budget',False)
+        if w.get('standalone_budget'):budget(w)
+        else:workflow(w,'heor_shared',1)
+    else:
+        rows=w.get('verified',[]);pairs=[(a,b) for a,b in itertools.combinations(rows,2) if comparison(a,b)]
+        st.caption(w.get('question','Previously reviewed evidence')+' · '+str(len(rows))+' verified findings')
+        # Render all tabs so widget state survives navigation.
+        clinical,economic,budget_tab,formulary=st.tabs(['Clinical comparison','Economic value','Budget impact','Formulary assessment'])
+        with clinical:clinical_results(w,'sharedcharts')
+        with economic:economics(w,'sharedecon',pairs)
+        with budget_tab:budget(w)
+        with formulary:
+            st.subheader('Integrated formulary decision brief')
+            clinical_rows=[r for r in rows if r.get('outcome') in ('HbA1c','weight','nausea','vomiting','diarrhea','discontinuation')]
+            if clinical_rows:st.dataframe(pd.DataFrame(clinical_rows).reindex(columns=['PMID','arm','outcome','value','unit','weeks','measure','comparator']),hide_index=True)
+            for label,k in [('Economic scenario','economic_result'),('Budget scenario','budget_result')]:
+                st.markdown('**'+label+'**')
+                if w.get(k):st.dataframe(pd.DataFrame([w[k]['results']]),hide_index=True)
+                else:st.caption('Not completed.')
+            access=st.text_area('Documented coverage criteria, source and date',key='sharedaccess')
+            conclusion=st.text_area('Reviewer conclusion and limitations',key='sharedconclusion')
+            if st.button('Save integrated assessment'):
+                save('Integrated HEOR assessment',dict(evidence=rows,economic=w.get('economic_result'),budget=w.get('budget_result'),coverage=access,conclusion=conclusion,question=w.get('question'),audit=w.get('audit')))
+            st.caption('No automatic preferred formulary status. Review safety, applicability, cost perspective and coverage before a decision.')
+        if st.button('← Review evidence',key='sharedback'):advance(w,1)
+        if st.button('Start another search',key='sharednew'):advance(w,0)
 elif S.page=='Clinical Review':
     st.title('Clinical medication review');st.caption('Research decision support for healthcare professionals. Clinical judgment required. Do not enter identifiable patient information.')
     w=workspace('clinical')
@@ -278,4 +312,4 @@ elif S.page=='My Assessments':
             data=copy.deepcopy(r);st.download_button('Export assessment',json.dumps(data,indent=2,default=str),f'assessment_{i+1}.json',key='report'+str(i));st.write('Saved research record; export includes source and review information.')
     if not S.reports:st.info('No saved assessments.')
 else:
-    st.title('Research methodology');st.caption('Version 7 · targeted search and reported-contrast analysis');st.write('PubMed retrieval → preliminary AI relevance screening → numerical extraction → source checks → human review → deterministic analysis. Manual reference workbook is reserved for independent validation, not embedded as answers.');st.warning('Unvalidated research prototype. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
+    st.title('Research methodology');st.caption('Version 8 · integrated HEOR assessment');st.write('PubMed retrieval → preliminary AI relevance screening → numerical extraction → source checks → human review → deterministic analysis. Manual reference workbook is reserved for independent validation, not embedded as answers.');st.warning('Unvalidated research prototype. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
