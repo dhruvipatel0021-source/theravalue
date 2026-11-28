@@ -7,7 +7,7 @@ from ai import ask,numeric_extract
 st.set_page_config(page_title='TheraValue',layout='wide')
 st.markdown('''<style>@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;600&display=swap'); .stApp{background:#f4f7fa} h1,h2,h3{font-family:Manrope,sans-serif!important;color:#142b40;letter-spacing:-.03em} h1{font-size:2.7rem} .block-container{max-width:1200px;padding-top:2rem} [data-testid="stSidebar"]{background:#e8eff4} .hero{background:linear-gradient(115deg,#142b40,#287f77);padding:32px;border-radius:18px;color:white;margin-bottom:24px}.hero h1{color:white;margin:0}.hero p{color:#d4e7ed} </style>''',unsafe_allow_html=True)
 S=st.session_state
-for k,v in dict(page='Overview',objective=0,work={},library={},reports=[]).items():
+for k,v in dict(page='Overview',objective=0,work={},library={},reports=[],verified_library={}).items():
     if k not in S:S[k]=v
 try:KEY=st.secrets.get('GROQ_API_KEY','')
 except Exception:KEY=''
@@ -31,7 +31,10 @@ def retrieve(w,key,default='',objective=0):
         try:
             with st.spinner('Planning and screening literature…'):
                 terms=build_query(q)
-                hits=search_pubmed(terms,20);w['audit'].append({'query':terms,'retrieved':len(hits)})
+                hits=search_pubmed(terms,20);
+                if '[PMID]' not in terms:
+                    rq='('+terms+') AND (randomized controlled trial[pt] OR random*[tiab])'; trialhits=search_pubmed(rq,20);w['audit'].append({'query':rq,'retrieved':len(trialhits)});hits=list({p['PMID']:p for p in trialhits+hits}.values())
+                w['audit'].append({'query':terms,'retrieved':len(hits)})
                 if objective in (1,3) and '[PMID]' not in terms:
                     try:
                         eq='('+terms+') AND (economic[tiab] OR cost[tiab] OR budget[tiab])'; extra=search_pubmed(eq,10);w['audit'].append({'query':eq,'retrieved':len(extra)});hits=list({p['PMID']:p for p in hits+extra}.values())
@@ -46,16 +49,21 @@ def retrieve(w,key,default='',objective=0):
                         lookup={str(x['PMID']):x for x in result['items']}
                         for p in batch:
                             x=lookup.get(p['PMID'],{});r=x.get('relevance');
-                            if r=='Direct' and screen(p,q)[0]!='Uncertain':r='Supporting'
-                            p.update(relevance=r if r in ['Direct','Supporting','Excluded','Uncertain'] else 'Uncertain',reason=str(x.get('reason','Not classified')))
+                            if r=='Direct' and screen(p,q)[0]=='Supporting':r='Supporting'
+                            if r=='Supporting' and ('network meta-analysis' in p['Title'].lower()):r='Indirect'
+                            p.update(relevance=r if r in ['Direct','Indirect','Supporting','Excluded','Uncertain'] else 'Uncertain',reason=str(x.get('reason','Not classified')))
                     except Exception:pass
         except Exception as e:st.error('Search failed: '+str(e)+' Try a direct PMID or retry.')
+    if S.verified_library:
+        reuse=st.multiselect('Reuse previously reviewed studies',list(S.verified_library),key=key+'reuse')
+        if st.button('Review saved findings',key=key+'reusebutton',disabled=not reuse):
+            w['rows']=copy.deepcopy([r for pmid in reuse for r in S.verified_library[pmid]]);advance(w,1)
     papers=w['papers']
     if not papers:return
     st.caption('AI screening is preliminary; confirm eligibility. Search is limited, not systematic.')
     with st.expander('Search audit'):st.dataframe(pd.DataFrame(w['audit']),hide_index=True)
     selected=[]
-    for category in ['Direct','Supporting','Uncertain','Unscreened','Excluded']:
+    for category in ['Direct','Indirect','Supporting','Uncertain','Unscreened','Excluded']:
         group=[p for p in papers if p['relevance']==category]
         if not group:continue
         with st.expander(f'{category} evidence · {len(group)}',expanded=category=='Direct'):
@@ -64,7 +72,9 @@ def retrieve(w,key,default='',objective=0):
                     st.markdown(f"**[{p['Title']}]({p['URL']})**");st.caption(p['reason']);st.caption(p['Design'])
                     with st.expander('Abstract'):st.write(p['Abstract'])
                     a,b=st.columns(2)
-                    if category!='Excluded' and a.checkbox('Select for extraction',key=key+'pick'+p['PMID']):selected.append(p)
+                    decision=a.radio('Study screening',['Pending','Include','Exclude'],horizontal=True,key=key+'screen'+p['PMID']);p['screen_decision']=decision
+                    p['review_reason']=st.text_input('Screening reason (optional)',key=key+'reason'+p['PMID'])
+                    if decision=='Include':selected.append(p)
                     if b.button('Save article',key=key+'save'+p['PMID']):S.library[p['PMID']]=copy.deepcopy(p);st.toast('Article saved')
     if not any(p['relevance']=='Direct' for p in papers):st.info('No direct evidence identified. Review supporting or uncertain studies, or refine the question.')
     if st.button('Extract selected evidence →',type='primary',key=key+'extract',disabled=not 0<len(selected)<=3):
@@ -80,6 +90,8 @@ def retrieve(w,key,default='',objective=0):
                     rr,nn=numeric_extract(KEY,p,source,url)
                     for r in rr:
                         r['quote']=recover_passage(r,source)
+                        if r.get('measure')=='between-arm difference' and not r.get('comparator') and r.get('comparison_group') and r['comparison_group']!='unknown':
+                            r['comparator']=r['comparison_group'];r['comparator_inferred']=True
                         r.update(source_text=source,source_scope=scope,relevance=p['relevance']);r['check']=evidence_check(r);r['decision']='Pending';r['raw_extraction']=copy.deepcopy({k:v for k,v in r.items() if k!='source_text'})
                     rows.extend(rr);notes.append({'PMID':p['PMID'],'limitations':nn})
             except Exception as e:st.error('Extraction failed for '+p['PMID']+': '+str(e))
@@ -90,15 +102,31 @@ def review(w,key):
     st.subheader('Verify extracted results');rows=w['rows']
     if not rows:st.info('Retrieve studies first.');return
     st.caption('Check source context, arm, dose and units. Automated checks are not scientific verification.')
-    cols=['PMID','arm','outcome','value','unit','weeks','comparison_group','comparator','measure','check','decision']
-    df=pd.DataFrame(rows).reindex(columns=cols);df.insert(0,'ID',range(1,len(df)+1))
-    ed=st.data_editor(df,hide_index=True,disabled=[c for c in df.columns if c!='decision'],column_config={'decision':st.column_config.SelectboxColumn('Review',options=['Pending','Confirm','Exclude','Needs correction'],required=True)},key=key+'editor')
-    for i,r in enumerate(rows):
-        decision=ed.iloc[i]['decision'];r['decision']=decision
-    if st.button('Confirm all source-checked rows I have reviewed',key=key+'batch'):
-        for r in rows:
-            if r['check'] in ['Number located','Arithmetic consistent'] and r['decision']=='Pending':r['decision']='Confirm'
-        S.pop(key+'editor',None);st.rerun()
+    cols=['arm','outcome','value','unit','weeks','measure','comparator','check','decision']
+    for pmid in dict.fromkeys(r['PMID'] for r in rows):
+        indices=[i for i,r in enumerate(rows) if r['PMID']==pmid]
+        with st.expander('Study '+pmid,expanded=True):
+            st.markdown(f"[Original publication](https://pubmed.ncbi.nlm.nih.gov/{pmid}/)")
+            st.dataframe(pd.DataFrame([rows[i] for i in indices]).reindex(columns=cols),hide_index=True)
+            for i in indices:
+                r=rows[i]
+                with st.expander(f"{r['arm']} · {r['outcome']} · {r['value']} {r['unit']} · {r['measure']}"):
+                    st.write(r.get('quote'));st.caption(str(r.get('check'))+' · Comparator: '+str(r.get('comparator')))
+                    if r.get('comparator_inferred'):st.warning('Comparator proposed from comparison group; verify explicitly against source.')
+                    st.write('Methods: '+str(r.get('methods_quote') or 'Not extracted'))
+                    x,y,z=st.columns(3)
+                    if x.button('Accept result',key=key+'accept'+str(i),disabled=r['check'] not in ['Number located','Arithmetic consistent','Manually documented']):r['decision']='Confirm';st.rerun()
+                    if y.button('Reject result',key=key+'reject'+str(i)):r['decision']='Exclude';st.rerun()
+                    if z.button('Needs correction',key=key+'correctflag'+str(i)):r['decision']='Needs correction';st.rerun()
+            x,y=st.columns(2)
+            if x.button('Accept reviewed results in this study',key=key+'studyaccept'+pmid):
+                for i in indices:
+                    r=rows[i]
+                    if r['decision']=='Pending' and r['check'] in ['Number located','Arithmetic consistent'] and not r.get('comparator_inferred'):r['decision']='Confirm'
+                st.rerun()
+            if y.button('Exclude entire study',key=key+'studyreject'+pmid):
+                for i in indices:rows[i]['decision']='Exclude'
+                st.rerun()
     idx=st.selectbox('Inspect or correct a result',range(len(rows)),format_func=lambda i:f"{i+1} · {rows[i]['arm']} · {rows[i]['outcome']}",key=key+'inspect');r=rows[idx]
     with st.container(border=True):
         st.write(r.get('quote') or 'No supporting passage');st.markdown(f"[Original publication]({r['source']})");st.caption(r['source_scope']+' · '+r['check'])
@@ -114,28 +142,31 @@ def review(w,key):
     st.download_button('Export draft and review decisions',pd.DataFrame(rows).drop(columns=['source_text'],errors='ignore').to_csv(index=False),key+'.csv',key=key+'csv')
     a,b=st.columns(2)
     if a.button('← Search',key=key+'back'):advance(w,0)
-    if b.button('Continue to assessment →',key=key+'next',type='primary',disabled=not valid):w['verified']=copy.deepcopy(valid);advance(w,2)
+    if b.button('Continue to assessment →',key=key+'next',type='primary',disabled=not valid):
+        w['verified']=copy.deepcopy(valid)
+        for r in valid:S.verified_library.setdefault(r['PMID'],[]);
+        for pmid in {r['PMID'] for r in valid}:S.verified_library[pmid]=copy.deepcopy([r for r in valid if r['PMID']==pmid])
+        advance(w,2)
 def clinical_results(w,key):
     rows=w.get('verified',[]);pairs=[(a,b) for a,b in itertools.combinations(rows,2) if comparison(a,b)]
     st.subheader('Evidence findings')
-    contrasts=[r for r in rows if direct_contrast(r)]
-    if contrasts:
-        st.markdown('**Reported head-to-head treatment effects**')
-        for r in contrasts:
-            st.write(f"{r['arm']} vs {r['comparator']}: {r['value']} {r['unit']} ({r['outcome']}, {r['weeks']} weeks)")
-            if r.get('ci_low') is not None and r.get('ci_high') is not None:st.caption(f"Reported 95% CI (verify level): {r['ci_low']} to {r['ci_high']}")
-            st.markdown(f"[Source]({r['source']})")
-        for outcome in set(r['outcome'] for r in contrasts):
-            subset=[r for r in contrasts if r['outcome']==outcome]
-            st.plotly_chart(px.bar(pd.DataFrame(subset),x='arm',y='value',text_auto=True,facet_col='PMID',title=outcome+' — reported differences vs stated comparator'),use_container_width=True)
-    if not pairs and not contrasts:st.warning('No confirmed comparable pair. Individual findings are shown, not a treatment comparison.')
-    if rows:st.dataframe(pd.DataFrame(rows).reindex(columns=['PMID','arm','outcome','value','unit','weeks','comparison_group']),hide_index=True)
-    for i,(a,b) in enumerate(pairs):
-        with st.container(border=True):
-            st.markdown(f"**{a['outcome']} · {a['weeks']} weeks · {a['comparison_group']}**")
-            st.plotly_chart(px.bar(pd.DataFrame([a,b]),x='arm',y='value',color='arm',text_auto=True,color_discrete_sequence=['#287f77','#567d9e'],labels={'arm':'Treatment','value':a['unit']}),key=key+'plot'+str(i),use_container_width=True)
-            st.write(f"Descriptive difference (first minus second): {a['value']-b['value']:.3g} {a['unit']}. Not an adjusted effect or significance test.");st.markdown(f"[Study source]({a['source']})")
-    st.caption('No cross-trial pooling, superiority inference or treatment ranking. Review confidence intervals and study limitations in the original publication.')
+    if rows:st.dataframe(pd.DataFrame(rows).reindex(columns=['PMID','arm','outcome','value','unit','weeks','measure','comparator','ci_low','ci_high']),hide_index=True)
+    groups={}
+    for r in rows:
+        if r.get('measure') not in ('change from baseline','between-arm difference','event rate'):continue
+        k=tuple(str(r.get(x)) for x in ['PMID','outcome','unit','weeks','measure','population'])+(str(r.get('comparator')) if r.get('measure')=='between-arm difference' else '',)
+        groups.setdefault(k,[]).append(r)
+    for i,(k,rr) in enumerate(groups.items()):
+        if len(rr)<2:continue
+        if len({r['arm'] for r in rr})!=len(rr):continue
+        df=pd.DataFrame(rr);title=f'{k[1]} · {k[4]} · {k[3]} weeks · PMID {k[0]}'
+        if k[-1]:title+=' · vs '+k[-1]
+        kwargs={}
+        if all(isinstance(r.get('ci_low'),(int,float)) and isinstance(r.get('ci_high'),(int,float)) and r['ci_low']<=r['value']<=r['ci_high'] for r in rr):
+            df['upper']=df.ci_high-df.value;df['lower']=df.value-df.ci_low;kwargs=dict(error_y='upper',error_y_minus='lower')
+        st.plotly_chart(px.bar(df,x='arm',y='value',text_auto=True,title=title,labels={'value':k[2],'arm':'Treatment'},color_discrete_sequence=['#287f77'],**kwargs),key=key+'group'+str(i),use_container_width=True)
+        st.markdown(f"[Study source]({rr[0]['source']})")
+    st.caption('Study-level descriptive results only; no cross-trial pooling. Between-arm estimates are separate from baseline changes.')
     return rows,pairs
 def economics(w,key,pairs):
     st.subheader('Medication cost per additional HbA1c reduction')
@@ -191,7 +222,20 @@ def workflow(w,key,objective=0,default=''):
             clinical_assessment(w,rows,pairs)
         elif objective==1:economics(w,key,pairs)
         elif objective==3:
-            e=st.text_area('Published economic findings and citations (if available)');a=st.text_area('Coverage criteria and source');c=st.text_area('Reviewer conclusion and uncertainty')
+            st.subheader('Formulary decision brief')
+            economic=[r for r in rows if any(x in str(r.get('outcome')).lower() for x in ['cost','icer','qaly','budget'])]
+            st.write('Published economic findings')
+            if economic:st.dataframe(pd.DataFrame(economic).reindex(columns=['PMID','arm','outcome','value','unit','perspective','price_year']),hide_index=True)
+            else:st.info('No verified economic findings. A preferred formulary position cannot be established from clinical evidence alone.')
+            a=st.text_area('Documented coverage criteria and source (optional)');e=st.text_area('Additional documented cost evidence (optional)')
+            c=''
+            if st.button('Generate formulary brief'):
+                try:
+                    payload=[{k:v for k,v in r.items() if k not in ('source_text','raw_extraction')} for r in rows]
+                    w['brief']=ask(KEY,'Return JSON with clinical_efficacy, safety, economic_value, access, conditional_position, uncertainty. Cite PMID for every evidence claim. Use only supplied verified findings and documented inputs. Missing evidence is unknown. No unconditional preference; do not invent prices or coverage.',json.dumps(dict(evidence=payload,coverage=a,cost=e)))
+                except Exception as ex:st.error(str(ex))
+            for label,value in w.get('brief',{}).items():st.markdown('**'+label.replace('_',' ').title()+'**');st.write(value)
+            c=st.text_area('Reviewer conclusion (optional)')
             if st.button('Save formulary assessment'):save('Formulary assessment',dict(evidence=rows,economics=e,access=a,conclusion=c))
         elif st.button('Save evidence assessment'):save('Clinical evidence assessment',dict(evidence=rows,comparison_count=len(pairs)))
         if st.button('← Review evidence'):advance(w,1)
@@ -234,4 +278,4 @@ elif S.page=='My Assessments':
             data=copy.deepcopy(r);st.download_button('Export assessment',json.dumps(data,indent=2,default=str),f'assessment_{i+1}.json',key='report'+str(i));st.write('Saved research record; export includes source and review information.')
     if not S.reports:st.info('No saved assessments.')
 else:
-    st.title('Research methodology');st.caption('Version 6 · targeted search and reported-contrast analysis');st.write('PubMed retrieval → preliminary AI relevance screening → numerical extraction → source checks → human review → deterministic analysis. Manual reference workbook is reserved for independent validation, not embedded as answers.');st.warning('Unvalidated research prototype. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
+    st.title('Research methodology');st.caption('Version 7 · targeted search and reported-contrast analysis');st.write('PubMed retrieval → preliminary AI relevance screening → numerical extraction → source checks → human review → deterministic analysis. Manual reference workbook is reserved for independent validation, not embedded as answers.');st.warning('Unvalidated research prototype. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
