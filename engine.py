@@ -52,3 +52,25 @@ def passage_status(quote,source):
             pos=idx+len(piece)
         return 'Partial source match'
     return 'Source not located'
+
+def evidence_check(r):
+    import re
+    q=r.get('quote') or ''; source=r.get('source_text') or ''
+    status=passage_status(q,source)
+    if status!='Exact source match':return status
+    nums=[float(x.replace('−','-')) for x in re.findall(r'[-−+]?\d+(?:\.\d+)?',q)]
+    v=r['value']
+    if r.get('value_origin')=='calculated':
+        a,b=r.get('baseline'),r.get('followup')
+        if isinstance(a,(int,float)) and isinstance(b,(int,float)) and a in nums and b in nums and abs(b-a-v)<1e-7:return 'Arithmetic consistent'
+        return 'Calculation needs review'
+    return 'Number located' if v in nums else 'Number needs review'
+
+def comparison(a,b):
+    fields=['PMID','outcome','unit','measure','weeks','population','comparison_group']
+    return all(a.get(k) not in (None,'','unknown') and a.get(k)==b.get(k) for k in fields) and a.get('arm')!=b.get('arm') and a.get('design')==b.get('design')=='direct randomized trial'
+
+def budget_model(n,a,b,da,db,uptake,years):
+    if min(n,da,db,years)<=0 or min(a,b)<0 or not 0<=uptake<=100:raise ValueError('Invalid scenario')
+    old=n*a/da*365*years; delta=n*uptake/100*(b/db-a/da)*365*years
+    return {'Current expenditure':old,'Scenario expenditure':old+delta,'Change':delta,'Switching patients':n*uptake/100}
