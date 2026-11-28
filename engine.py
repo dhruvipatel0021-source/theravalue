@@ -139,7 +139,7 @@ def evidence_check(r):
     drugs=drugs_in(arm)
     if not drugs or not all(d in drugs_in(q) for d in drugs):return 'Arm needs review'
     doses=re.findall(r'\b\d+(?:\.\d+)?\s*mg\b',arm)
-    if any(not re.search(r'(?<![\d.])'+re.escape(d.replace(' ',''))+r'(?!\w)',q.replace(' ','')) for d in doses):return 'Dose needs review'
+    if any(not re.search(r'(?<![\d.])'+re.escape(d.replace(' ', '').removesuffix('mg'))+r'\s*mg\b',q) for d in doses):return 'Dose needs review'
     outcome=str(r.get('outcome') or '').lower()
     patterns={'hba1c':r'hba\s*1c|glycat\w* h[ae]emoglobin|glycated hemoglobin','weight':r'weight','nausea':r'nausea','vomiting':r'vomit','diarrhea':r'diarrh','discontinuation':r'discontinu','gastrointestinal adverse events':r'gastrointestinal'}
     if not re.search(patterns.get(outcome,re.escape(outcome) if outcome else r'(?!)'),q):return 'Outcome needs review'

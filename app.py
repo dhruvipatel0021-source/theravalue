@@ -87,10 +87,6 @@ def retrieve(w,key,default='',objective=0):
             try:
                 with st.spinner('Extracting PMID '+p['PMID']):
                     source=p['Abstract'];url=p['URL'];scope='Abstract'
-                    try:
-                        ft=full_text(p['PMID'])
-                        if ft and ft[0]:source+='\n'+ft[0][:30000];url=ft[1];scope='Abstract + accessible paragraphs (limited)'
-                    except Exception:pass
                     source=normalize_source(source)
                     rr,nn=numeric_extract(KEY,p,source,url)
                     for r in rr:
@@ -107,6 +103,11 @@ def review(w,key):
     st.subheader('Verify extracted results');rows=w['rows']
     if not rows:st.info('Retrieve studies first.');return
     st.caption('Check source context, arm, dose and units. Automated checks are not scientific verification.')
+    for note in w.get('notes',[]):
+        if note.get('limitations'):
+            with st.expander('Extraction completeness and limitations · '+str(note['PMID']),expanded=True):
+                for item in note['limitations']:st.write(item)
+    st.caption('Check that every requested outcome and treatment arm is represented; missing rows are not evidence of no effect.')
     cols=['arm','outcome','value','unit','weeks','measure','comparator','check','decision']
     for pmid in dict.fromkeys(r['PMID'] for r in rows):
         indices=[i for i,r in enumerate(rows) if r['PMID']==pmid]
@@ -335,4 +336,4 @@ elif S.page=='My Assessments':
             data=copy.deepcopy(r);st.download_button('Export assessment',json.dumps(data,indent=2,default=str),f'assessment_{i+1}.json',key='report'+str(i));st.write('Saved research record; export includes source and review information.')
     if not S.reports:st.info('No saved assessments.')
 else:
-    st.title('Research methodology');st.caption('Version 10 · research prototype');st.graphviz_chart('digraph { rankdir=LR; node [shape=box style="rounded,filled" fillcolor="#DDEDE9" color="#287F77"]; Retrieval -> Screening -> Extraction -> Verification -> Analysis; }');st.caption('Human verification is required before analysis. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
+    st.title('Research methodology');st.caption('Version 11 · research prototype');st.graphviz_chart('digraph { rankdir=LR; node [shape=box style="rounded,filled" fillcolor="#DDEDE9" color="#287F77"]; Retrieval -> Screening -> Extraction -> Verification -> Analysis; }');st.caption('Human verification is required before analysis. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
