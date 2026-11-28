@@ -5,7 +5,7 @@ import json,re,itertools,copy
 from engine import search_pubmed,full_text,evidence_check,comparison,compatible,incremental,budget_model,build_query,screen,recover_passage,direct_contrast
 from ai import ask,numeric_extract
 st.set_page_config(page_title='TheraValue',layout='wide')
-st.markdown('''<style>@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;600&display=swap'); .stApp{background:#f4f7fa} h1,h2,h3{font-family:Manrope,sans-serif!important;color:#142b40;letter-spacing:-.03em} h1{font-size:2.7rem} .block-container{max-width:1200px;padding-top:2rem} [data-testid="stSidebar"]{background:#e8eff4} .hero{background:linear-gradient(115deg,#142b40,#287f77);padding:32px;border-radius:18px;color:white;margin-bottom:24px}.hero h1{color:white;margin:0}.hero p{color:#d4e7ed} </style>''',unsafe_allow_html=True)
+st.markdown('''<style>@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;600&display=swap'); .stApp{background:#f4f7fa} h1,h2,h3{font-family:Manrope,sans-serif!important;color:#142b40;letter-spacing:-.03em} h1{font-size:2.7rem} .block-container{max-width:1200px;padding-top:2rem} [data-testid="stSidebar"]{background:#e8eff4} .hero{background:linear-gradient(115deg,#142b40,#287f77);padding:32px;border-radius:18px;color:white;margin-bottom:24px}.hero h1{color:white;margin:0}.hero p{color:#d4e7ed} .hero{position:relative;overflow:hidden;background:radial-gradient(circle at 85% 25%,#459caa 0%,transparent 32%),linear-gradient(115deg,#142b40,#245a71);padding:42px} .orb{position:absolute;right:8%;top:15%;width:125px;height:125px;border-radius:50%;background:radial-gradient(circle at 30% 25%,#d8ffff,#49a9b5 30%,#23536e 75%);box-shadow:18px 22px 38px #102b4488;opacity:.85} .hero h1,.hero p{position:relative;z-index:1;max-width:75%} [data-testid=stVerticalBlockBorderWrapper]{border-radius:16px} [data-testid=stMetric]{background:#fff;padding:16px;border-radius:12px} .eyebrow{font-size:12px;letter-spacing:.14em;font-weight:700;color:#087f8c} .stButton button{border-radius:9px} .stApp{font-family:Inter,sans-serif} </style>''',unsafe_allow_html=True)
 S=st.session_state
 for k,v in dict(page='Overview',objective=0,work={},library={},reports=[],verified_library={}).items():
     if k not in S:S[k]=v
@@ -17,6 +17,7 @@ EX=['How do Drug A and Drug B compare for glycemic control and tolerability?','W
 DRUGS=['tirzepatide','semaglutide','liraglutide','dulaglutide','exenatide','lixisenatide']
 def go(p):S.page=p
 def launch(i):S.objective=i;S.page=PAGES[1]
+def select_mode(i):S.objective=i
 def save(kind,data):S.reports.append(dict(type=kind,data=copy.deepcopy(data)));st.success('Saved for this session. Export from My Assessments.')
 def workspace(key):return S.work.setdefault(key,dict(stage=0,papers=[],rows=[],audit=[],notes=[]))
 def advance(w,n):w['stage']=n;st.rerun()
@@ -25,6 +26,7 @@ for col,p in zip(nav[1:],PAGES[1:]):col.button(p,on_click=go,args=(p,),type='pri
 if S.page!='Overview':st.button('← Home',on_click=go,args=('Overview',))
 def retrieve(w,key,default='',objective=0):
     st.subheader('Find relevant studies')
+    st.caption(['Find clinical efficacy and safety evidence.','Find clinical and published economic evidence.','Model population expenditure.','Find clinical, economic and access evidence.'][objective])
     q=st.text_area('Research question or PMID',value=default,placeholder=EX[objective],key=key+'q')
     if st.button('Find studies',key=key+'search',type='primary',disabled=not q.strip()):
         w.update(papers=[],rows=[],audit=[],notes=[],question=q);w.pop('economic_result',None);w.pop('budget_result',None);w.pop('brief',None)
@@ -57,7 +59,7 @@ def retrieve(w,key,default='',objective=0):
     if S.verified_library:
         reuse=st.multiselect('Reuse previously reviewed studies',list(S.verified_library),key=key+'reuse')
         if st.button('Review saved findings',key=key+'reusebutton',disabled=not reuse):
-            w['rows']=copy.deepcopy([r for pmid in reuse for r in S.verified_library[pmid]]);advance(w,1)
+            w.update(rows=copy.deepcopy([r for pmid in reuse for r in S.verified_library[pmid]]),question='Reused reviewed studies: '+', '.join(reuse),audit=[],notes=[]);advance(w,1)
     papers=w['papers']
     if not papers:return
     st.caption('AI screening is preliminary; confirm eligibility. Search is limited, not systematic.')
@@ -115,7 +117,7 @@ def review(w,key):
                     if r.get('comparator_inferred'):st.warning('Comparator proposed from comparison group; verify explicitly against source.')
                     st.write('Methods: '+str(r.get('methods_quote') or 'Not extracted'))
                     x,y,z=st.columns(3)
-                    if x.button('Accept result',key=key+'accept'+str(i),disabled=r['check'] not in ['Number located','Arithmetic consistent','Manually documented']):r['decision']='Confirm';st.rerun()
+                    if x.button('Accept result',key=key+'accept'+str(i),disabled=r['check'] not in ['Number located','Arithmetic consistent','Manually documented'] or (r.get('measure')=='between-arm difference' and not r.get('comparator'))):r['decision']='Confirm';st.rerun()
                     if y.button('Reject result',key=key+'reject'+str(i)):r['decision']='Exclude';st.rerun()
                     if z.button('Needs correction',key=key+'correctflag'+str(i)):r['decision']='Needs correction';st.rerun()
             x,y=st.columns(2)
@@ -168,6 +170,14 @@ def clinical_results(w,key):
         st.markdown(f"[Study source]({rr[0]['source']})")
     st.caption('Study-level descriptive results only; no cross-trial pooling. Between-arm estimates are separate from baseline changes.')
     return rows,pairs
+def economic_display(result,ca,cb,da,db,weeks,effect,key):
+    a,b,c=st.columns(3);a.metric('Incremental medication cost',f"${result['Incremental cost']:,.0f}");b.metric('Additional HbA1c reduction',f'{effect:.2f} pp');ratio=result['Cost per additional pp'];c.metric('Cost / additional pp',f'${ratio:,.0f}' if ratio is not None else 'Not applicable')
+    if effect>0 and result['Incremental cost']<0:st.success('Lower modeled medication cost and greater observed HbA1c reduction.')
+    st.dataframe(pd.DataFrame([result]),hide_index=True)
+    df=pd.DataFrame([{'Intervention price change (%)':x,'Incremental cost ($)':incremental(ca*(1+x/100),cb,da,db,weeks,effect)['Incremental cost']} for x in range(-30,31,5)])
+    st.plotly_chart(px.line(df,x='Intervention price change (%)',y='Incremental cost ($)',markers=True,title='Sensitivity to intervention price',color_discrete_sequence=['#7065C8']),key=key+'sensitivity',use_container_width=True)
+    st.caption('One-way scenario sensitivity; comparator price and trial effect held constant.')
+
 def economics(w,key,pairs):
     w.pop("economic_result",None)
     published=[r for r in w.get("verified",[]) if any(x in str(r.get("outcome")).lower() for x in ("cost","icer","qaly","budget"))]
@@ -185,13 +195,13 @@ def economics(w,key,pairs):
         a,b=st.columns(2);ca=a.number_input(r['arm']+' supply cost ($)',min_value=0.,value=None);cb=b.number_input(r['comparator']+' supply cost ($)',min_value=0.,value=None);da=a.number_input('Intervention supply days',min_value=1,value=28);db=b.number_input('Comparator supply days',min_value=1,value=28)
         src=st.text_input('Cost source, date and USD year');ok=st.checkbox('I verified the reported randomized contrast, its analysis method and comparable cost inputs')
         if ca is not None and cb is not None and src and ok:
-            result=incremental(ca,cb,da,db,r['weeks'],-r['value']);w["economic_result"]=dict(results=result,basis=basis,source=src,costs=[ca,cb,da,db],evidence=r if "r" in locals() else [a,b]);st.dataframe(pd.DataFrame([result]),hide_index=True);st.caption('Trial-duration medication-only scenario, not full cost-effectiveness or cost-utility analysis.')
+            result=incremental(ca,cb,da,db,r['weeks'],-r['value']);w["economic_result"]=dict(results=result,basis=basis,source=src,costs=[ca,cb,da,db],evidence=r if "r" in locals() else [a,b]);economic_display(result,ca,cb,da,db,r['weeks'],-r['value'],key);st.caption('Trial-duration medication-only scenario, not full cost-effectiveness or cost-utility analysis.')
             if st.button('Save economic assessment'):save('Economic assessment',dict(results=result,evidence=r,source=src,basis=basis,costs=[ca,cb,da,db]))
         return
     a,b=st.selectbox('Comparison',pairs,format_func=lambda p:p[0]['arm']+' vs '+p[1]['arm'],key=key+'pair');basis=st.selectbox('Cost basis',['Payer net cost','Acquisition benchmark','Cash price','Patient out-of-pocket'],key=key+'basis');ca=st.number_input('First treatment supply cost ($)',min_value=0.,value=None);cb=st.number_input('Second treatment supply cost ($)',min_value=0.,value=None);da=st.number_input('First supply days',min_value=1,value=28);db=st.number_input('Second supply days',min_value=1,value=28);src=st.text_input('Dose-specific cost sources, dates and USD year');ok=st.checkbox('Confirm comparable cost basis and documented inputs')
     if ca is not None and cb is not None and src and ok:
         if b['value']<a['value']:a,b=b,a;ca,cb=cb,ca;da,db=db,da
-        result=incremental(ca,cb,da,db,a['weeks'],b['value']-a['value']);w["economic_result"]=dict(results=result,basis=basis,source=src,costs=[ca,cb,da,db],evidence=r if "r" in locals() else [a,b]);st.dataframe(pd.DataFrame([result]),hide_index=True);st.caption('Medication-only, constant price and full persistence; not a QALY-based analysis.')
+        result=incremental(ca,cb,da,db,a['weeks'],b['value']-a['value']);w["economic_result"]=dict(results=result,basis=basis,source=src,costs=[ca,cb,da,db],evidence=r if "r" in locals() else [a,b]);economic_display(result,ca,cb,da,db,a['weeks'],b['value']-a['value'],key);st.caption('Medication-only, constant price and full persistence; not a QALY-based analysis.')
         if st.button('Save economic assessment'):save('Economic assessment',dict(results=result,evidence=[a,b],source=src,basis=basis,costs=[ca,cb,da,db]))
 def budget(w=None):
     if w is not None:w.pop("budget_result",None)
@@ -249,42 +259,52 @@ def workflow(w,key,objective=0,default=''):
         if st.button('← Review evidence'):advance(w,1)
         if st.button('Start another search'):advance(w,0)
 if S.page=='Overview':
-    st.markdown('<div class="hero"><h1>TheraValue</h1><p>Clinical and pharmacoeconomic research workspace</p></div>',unsafe_allow_html=True)
+    st.markdown('<div class="hero"><div class="orb"></div><div style="color:#a6e4e5;font-size:12px;letter-spacing:2px">THERAVALUE / RESEARCH EDITION</div><h1>Evidence into value.</h1><p>Clinical and economic intelligence for GLP-1 therapies in type 2 diabetes.</p></div>',unsafe_allow_html=True)
+    st.markdown('<div class="eyebrow">CHOOSE YOUR DECISION</div>',unsafe_allow_html=True)
+    descriptions=['Compare trial efficacy, safety and tolerability.','Explore published economics and incremental medication value.','Model uptake, expenditure and price sensitivity.','Integrate clinical evidence, affordability and plan criteria.']
+    colors=['#087F8C','#7065C8','#39749B','#B17B32']
     for j in (0,2):
         for col,i in zip(st.columns(2),range(j,j+2)):
             with col:
-                with st.container(border=True):st.subheader(OBJ[i]);st.caption(EX[i]);st.button('Start assessment →',key='home'+str(i),on_click=launch,args=(i,))
-    st.button('Review a clinical case →',on_click=go,args=('Clinical Review',),type='primary')
+                with st.container(border=True):
+                    st.markdown(f'<div style="height:5px;background:{colors[i]};border-radius:8px;margin-bottom:12px"></div>',unsafe_allow_html=True);st.subheader(OBJ[i]);st.caption(descriptions[i]);st.button('Open '+OBJ[i].lower()+' →',key='home'+str(i),on_click=launch,args=(i,),use_container_width=True)
+    with st.container(border=True):
+        st.subheader('Patient-specific clinical review');st.caption('Explore clinical priorities, safety considerations and affordability for a de-identified case.');st.button('Open clinical review →',on_click=go,args=('Clinical Review',),type='primary')
+    st.caption('Research prototype · Human-reviewed evidence · No patient identifiers')
 elif S.page==PAGES[1]:
-    st.title(PAGES[1]);w=workspace('heor_shared')
-    st.caption('One evidence review, four distinct decision outputs.')
-    if w['stage']<2:
-        if st.button('Open standalone budget calculator') :w['standalone_budget']=not w.get('standalone_budget',False)
-        if w.get('standalone_budget'):budget(w)
-        else:workflow(w,'heor_shared',1)
+    i=S.objective
+    cols=st.columns(4)
+    for j,col in enumerate(cols):col.button(OBJ[j],key='mode'+str(j),on_click=select_mode,args=(j,),type='primary' if i==j else 'secondary',use_container_width=True)
+    st.title(OBJ[i]);st.caption(['Clinical evidence intelligence','HEOR · Economic evidence and scenario analysis','Population expenditure modeling','Formulary & access decision support'][i])
+    w=workspace('heor'+str(i));key='heor'+str(i)
+    if i==2:budget(w)
+    elif w['stage']<2:workflow(w,key,i)
     else:
         rows=w.get('verified',[]);pairs=[(a,b) for a,b in itertools.combinations(rows,2) if comparison(a,b)]
-        st.caption(w.get('question','Previously reviewed evidence')+' · '+str(len(rows))+' verified findings')
-        # Render all tabs so widget state survives navigation.
-        clinical,economic,budget_tab,formulary=st.tabs(['Clinical comparison','Economic value','Budget impact','Formulary assessment'])
-        with clinical:clinical_results(w,'sharedcharts')
-        with economic:economics(w,'sharedecon',pairs)
-        with budget_tab:budget(w)
-        with formulary:
-            st.subheader('Integrated formulary decision brief')
-            clinical_rows=[r for r in rows if r.get('outcome') in ('HbA1c','weight','nausea','vomiting','diarrhea','discontinuation')]
-            if clinical_rows:st.dataframe(pd.DataFrame(clinical_rows).reindex(columns=['PMID','arm','outcome','value','unit','weeks','measure','comparator']),hide_index=True)
-            for label,k in [('Economic scenario','economic_result'),('Budget scenario','budget_result')]:
-                st.markdown('**'+label+'**')
-                if w.get(k):st.dataframe(pd.DataFrame([w[k]['results']]),hide_index=True)
-                else:st.caption('Not completed.')
-            access=st.text_area('Documented coverage criteria, source and date',key='sharedaccess')
-            conclusion=st.text_area('Reviewer conclusion and limitations',key='sharedconclusion')
-            if st.button('Save integrated assessment'):
-                save('Integrated HEOR assessment',dict(evidence=rows,economic=w.get('economic_result'),budget=w.get('budget_result'),coverage=access,conclusion=conclusion,question=w.get('question'),audit=w.get('audit')))
-            st.caption('No automatic preferred formulary status. Review safety, applicability, cost perspective and coverage before a decision.')
-        if st.button('← Review evidence',key='sharedback'):advance(w,1)
-        if st.button('Start another search',key='sharednew'):advance(w,0)
+        if i==0:
+            clinical_results(w,key)
+            if st.button('Save clinical comparison'):save('Clinical comparison',dict(evidence=rows,question=w.get('question'),audit=w.get('audit')))
+        elif i==1:economics(w,key,pairs)
+        else:
+            st.subheader('Formulary decision brief')
+            payer=st.selectbox('Coverage context',['Commercial','Medicare','Medicaid','Health system','Other / unknown'])
+            access=st.text_area('Verified coverage criteria, patient cost, source and date',placeholder='Enter plan-specific information; unknown is acceptable.')
+            cost=st.text_area('Documented economic evidence or cost inputs',placeholder='Enter source, perspective and date, or leave blank.')
+            st.caption('Only verified findings and documented inputs are used. No automatic coverage claims.')
+            with st.expander('Reviewed evidence'):st.dataframe(pd.DataFrame(rows).reindex(columns=['PMID','arm','outcome','value','unit','measure','comparator']),hide_index=True)
+            if st.button('Generate decision brief',type='primary'):
+                try:
+                    payload=[{k:v for k,v in r.items() if k not in ('source_text','raw_extraction')} for r in rows]
+                    w['brief']=ask(KEY,'Return JSON with clinical_value, safety, economic_value, access, conditional_formulary_considerations, evidence_gaps. Cite PMID for every study claim. Use only supplied verified evidence and documented inputs; distinguish user inputs from publications. Never invent coverage, prices or clinical claims. No unconditional preference.',json.dumps(dict(evidence=payload,payer=payer,coverage=access,cost=cost)))
+                    w['brief_inputs']=[payer,access,cost]
+                except Exception as e:st.error(str(e))
+            if w.get('brief') and w.get('brief_inputs')==[payer,access,cost]:
+                for label,value in w['brief'].items():
+                    with st.container(border=True):st.markdown('**'+label.replace('_',' ').title()+'**');st.write(value)
+                if st.button('Save formulary brief'):save('Formulary brief',dict(brief=w['brief'],evidence=rows,payer=payer,coverage=access,cost=cost))
+        a,b=st.columns(2)
+        if a.button('← Review evidence',key=key+'backresults'):advance(w,1)
+        if b.button('New search',key=key+'new'):advance(w,0)
 elif S.page=='Clinical Review':
     st.title('Clinical medication review');st.caption('Research decision support for healthcare professionals. Clinical judgment required. Do not enter identifiable patient information.')
     w=workspace('clinical')
@@ -312,4 +332,4 @@ elif S.page=='My Assessments':
             data=copy.deepcopy(r);st.download_button('Export assessment',json.dumps(data,indent=2,default=str),f'assessment_{i+1}.json',key='report'+str(i));st.write('Saved research record; export includes source and review information.')
     if not S.reports:st.info('No saved assessments.')
 else:
-    st.title('Research methodology');st.caption('Version 8 · integrated HEOR assessment');st.write('PubMed retrieval → preliminary AI relevance screening → numerical extraction → source checks → human review → deterministic analysis. Manual reference workbook is reserved for independent validation, not embedded as answers.');st.warning('Unvalidated research prototype. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
+    st.title('Research methodology');st.caption('Version 9 · purpose-specific research workspaces');st.write('PubMed retrieval → preliminary AI relevance screening → numerical extraction → source checks → human review → deterministic analysis. Manual reference workbook is reserved for independent validation, not embedded as answers.');st.warning('Unvalidated research prototype. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
