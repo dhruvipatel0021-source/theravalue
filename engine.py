@@ -1,9 +1,20 @@
-import requests, xml.etree.ElementTree as ET, math
+import time, requests, xml.etree.ElementTree as ET, math
+def get(url, **kwargs):
+    for i in range(3):
+        try:
+            r=requests.get(url, **kwargs)
+            if r.status_code not in (429,500,502,503,504): return r
+        except requests.RequestException:
+            if i==2: raise
+        time.sleep(1.5*(i+1))
+    return r
+
 BASE='https://eutils.ncbi.nlm.nih.gov/entrez/eutils/'
 def search_pubmed(query,limit=30):
-    r=requests.get(BASE+'esearch.fcgi',params={'db':'pubmed','term':query,'retmode':'json','retmax':limit,'sort':'relevance'},timeout=30);r.raise_for_status(); ids=r.json()['esearchresult']['idlist']
+    r=get(BASE+'esearch.fcgi',params={'db':'pubmed','term':query,'retmode':'json','retmax':limit,'sort':'relevance','tool':'theravalue' },timeout=30);r.raise_for_status(); ids=r.json()['esearchresult']['idlist']
     if not ids:return []
-    r=requests.get(BASE+'efetch.fcgi',params={'db':'pubmed','id':','.join(ids),'retmode':'xml'},timeout=30);r.raise_for_status();out=[]
+    time.sleep(.4)
+    r=get(BASE+'efetch.fcgi',params={'db':'pubmed','id':','.join(ids),'retmode':'xml'},timeout=30);r.raise_for_status();out=[]
     for a in ET.fromstring(r.content).findall('.//PubmedArticle'):
         pmid=a.findtext('.//PMID'); title=a.find('.//ArticleTitle'); types=[t.text for t in a.findall('.//PublicationType')]; abstract='\n'.join(''.join(t.itertext()) for t in a.findall('.//Abstract/AbstractText'))
         out.append(dict(PMID=pmid,Title=''.join(title.itertext()) if title is not None else '',Abstract=abstract,Design='; '.join(types),URL=f'https://pubmed.ncbi.nlm.nih.gov/{pmid}/'))
