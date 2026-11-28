@@ -41,12 +41,17 @@ def _cached_extract(key,p_json,source,source_url):
     chunk=[{'id':i,'text':v} for i,v in enumerate(passages)]
     result=ask(key,prompt+"\nExtract ALL reported arms and outcomes in ONE response: HbA1c, weight, GI adverse events, other safety, discontinuation, published contrasts and confidence intervals. Check every arm for every reported outcome before returning. Use outcome label gastrointestinal adverse events for aggregate GI disorders. Do not omit later arms. Use global passage IDs.",json.dumps({'title':p['Title'],'passages':chunk}))
 
+    if not isinstance(result,dict): raise ValueError('AI response must be a JSON object.')
+    raw_rows=result.get('rows')
+    if not isinstance(raw_rows,list): raise ValueError('AI response missing a valid rows array; retry extraction.')
+    raw_notes=result.get('limitations')
+    notes=[str(x) for x in raw_notes if x is not None] if isinstance(raw_notes,list) else ([raw_notes] if isinstance(raw_notes,str) and raw_notes.strip() else [])
     rows=[]
-    for r in result.get('rows',[]):
+    for r in raw_rows:
         if not isinstance(r,dict):continue
         v=r.get('value'); idx=r.get('passage_id'); q=passages[idx] if type(idx) is int and 0<=idx<len(passages) else None; r['quote']=q
         if not isinstance(v,(int,float)) or isinstance(v,bool) or not math.isfinite(v):continue
-        if r.get("outcome", "").lower()=="hba1c" and str(r.get("unit", "")).lower() in ("percentage points", "percentage point", "pp"): r["unit"]="pp"; r["outcome"]="HbA1c"
+        if str(r.get("outcome") or "").lower()=="hba1c" and str(r.get("unit", "")).lower() in ("percentage points", "percentage point", "pp"): r["unit"]="pp"; r["outcome"]="HbA1c"
         rows.append({**{k:r.get(k) for k in ['arm','outcome','value','unit','measure','weeks','population','estimand','design','quote','comparison_group','value_origin','baseline','followup','comparator','ci_low','ci_high','p_value','methods_quote','currency','price_year','perspective','event_count','denominator']},'PMID':p['PMID'],'source':source_url,'passage_match':bool(isinstance(q,str) and q.strip() and q in source),'reviewed':False})
     unique={}
     for r in rows:
@@ -54,8 +59,8 @@ def _cached_extract(key,p_json,source,source_url):
         unique.setdefault(k,r)
     rows=list(unique.values())
     for name in ('HbA1c','weight','gastrointestinal adverse events'):
-        if not any(str(r.get('outcome')).lower()==name.lower() for r in rows):result['limitations'].append('No '+name+' rows extracted; check source for missing outcomes before analysis.')
-    return rows,list(dict.fromkeys(str(x) for x in result['limitations']))
+        if not any(str(r.get('outcome')).lower()==name.lower() for r in rows):notes.append('No '+name+' rows extracted; check source for missing outcomes before analysis.')
+    return rows,list(dict.fromkeys(str(x) for x in notes))
 
 
 def numeric_extract(key,p,source,source_url):
