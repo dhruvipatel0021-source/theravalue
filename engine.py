@@ -35,3 +35,20 @@ def incremental(a,b,days_a,days_b,weeks,effect):
 def compatible(a,b):
     fields=['PMID','outcome','unit','measure','weeks','population','estimand']
     return all(a.get(k) not in (None,'','unknown') and a.get(k)==b.get(k) for k in fields) and a.get('arm')!=b.get('arm') and a.get('measure')=='change from baseline' and a.get('design')==b.get('design')=='direct randomized trial'
+
+
+def passage_status(quote,source):
+    import re, unicodedata
+    def norm(x):return ' '.join(unicodedata.normalize('NFKC',x).split())
+    if not isinstance(quote,str) or not quote.strip() or not source:return 'Source not located'
+    q=norm(quote);src=norm(source)
+    if q in src:return 'Exact source match'
+    pieces=[x.strip() for x in re.split(r'\.{3,}|…',q) if x.strip()]
+    if len(pieces)>1 and sum(map(len,pieces))>=25:
+        pos=0
+        for piece in pieces:
+            idx=src.find(piece,pos)
+            if idx<0:return 'Source not located'
+            pos=idx+len(piece)
+        return 'Partial source match'
+    return 'Source not located'

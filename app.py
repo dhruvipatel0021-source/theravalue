@@ -27,14 +27,14 @@ for k,v in {'rows':[],'notes':{},'queries':[],'stage':0,'objective':0}.items():
     if k not in st.session_state:st.session_state[k]=v
 
 OBJECTIVES=[('Compare therapies','Drug A vs Drug B: efficacy, safety and tolerability'),('Evaluate economic value','Additional medication cost per unit of clinical benefit'),('Estimate budget impact','Annual expenditure after a change in formulary uptake'),('Conduct a formulary review','Clinical evidence, published economics and access considerations')]
+EXAMPLES=["How does Drug A compare with Drug B for HbA1c reduction and adverse effects?","What is the additional medication cost of Drug A versus Drug B per additional HbA1c reduction?","What is the annual pharmacy expenditure impact of switching 20% of eligible patients from Drug A to Drug B?","What clinical, economic and access evidence supports adding Drug A to the formulary?"]
 def stage(n): st.session_state.stage=n
 def launch(i):
     st.session_state.objective=i;st.session_state.pop('objective_choice',None);stage(0);go('HEOR & Formulary')
 def evidence():
     st.subheader('Define your assessment')
-    i=st.radio('Objective',range(4),format_func=lambda i:OBJECTIVES[i][0],index=st.session_state.objective,key='objective_choice');st.session_state.objective=i
-    st.markdown(f'<div style="color:#426eaa;font-size:.9rem;margin-bottom:1rem">Example: {OBJECTIVES[i][1]}</div>',unsafe_allow_html=True)
-    q=st.text_area('Research question or PMID',placeholder='Compare two therapies in adults with type 2 diabetes',key='question')
+    i=st.radio('Objective',range(4),format_func=lambda i:OBJECTIVES[i][0]+'  —  '+OBJECTIVES[i][1],index=st.session_state.objective,key='objective_choice');st.session_state.objective=i
+    q=st.text_area('Research question or PMID',placeholder=EXAMPLES[i],key='question')
     direct=st.checkbox('Prioritize randomized trials',value=i!=3)
     if st.button('Retrieve studies',type='primary',disabled=not q.strip()):
         st.session_state.papers=[];st.session_state.queries=[]
@@ -62,7 +62,7 @@ def evidence():
                 except Exception as e:audit.append({'query':query,'error':type(e).__name__});st.warning('PubMed request failed: '+type(e).__name__+'. Other searches will continue.')
             st.session_state.papers=list(found.values());st.session_state.queries=audit
     if st.session_state.queries:
-        with st.expander('Search audit'):st.write(st.session_state.queries)
+        with st.expander('Search audit'):st.dataframe(pd.DataFrame(st.session_state.queries),hide_index=True)
     papers=st.session_state.papers
     st.caption(f'{len(papers)} retrieved records · limited search, not exhaustive')
     selected=st.multiselect('Select up to three relevant studies', [p['PMID'] for p in papers],format_func=lambda id:next(p['Title'] for p in papers if p['PMID']==id),max_selections=3)
@@ -81,7 +81,7 @@ def evidence():
                         except Exception:st.warning('Full text unavailable; using abstract.')
                     if not source:continue
                     rows,notes=numeric_extract(KEY,p,source,url)
-                    for r in rows:r['source_scope']=label
+                    for r in rows:r['source_scope']=label; r['source_text']=source
                     st.session_state.rows=[r for r in st.session_state.rows if r['PMID']!=p['PMID']]+rows;st.session_state.notes[p['PMID']]=notes;success+=len(rows)
             except Exception as e:st.error('Extraction failed for '+p['PMID']+': '+type(e).__name__+'. Retry later.')
         if success:stage(1);st.rerun()
@@ -99,24 +99,54 @@ def review():
         if len(group)>1:
             st.markdown(f'**{outcome}**');st.caption(f'PMID {pmid} · {measure} · {weeks} weeks · draft values')
             fig=px.bar(group,x='arm',y='value',color='arm',color_discrete_sequence=['#16877c','#426eaa','#7765a0','#c28a39'],labels={'value':unit,'arm':'Treatment'},text_auto=True);fig.update_layout(showlegend=False);st.plotly_chart(fig,use_container_width=True)
+    with st.expander('Comparison table',expanded=True):
+        st.dataframe(df[['PMID','arm','outcome','value','unit','measure','weeks','reviewed']],hide_index=True,use_container_width=True)
     st.caption('Confirm the value, dose, outcome definition and source context. Matching text alone is not verification.')
     for i,r in enumerate(st.session_state.rows):
         with st.expander(f"{r['arm']} · {r['outcome']} · {r['value']} {r['unit']}"):
             st.write(r['quote']);st.markdown(f"[Original source]({r['source']})");st.caption(f"{r['measure']} · {r['weeks']} weeks · {r['source_scope']} · estimand: {r['estimand']}")
-            st.write('Passage matched' if r['passage_match'] else 'Passage not matched — cannot approve for analysis')
-            r['reviewed']=st.checkbox('I verified this value and its interpretation',value=bool(r['reviewed']),key=f"review_{r['PMID']}_{i}_{r['value']}_{r['outcome']}",disabled=not r['passage_match'])
-    st.download_button('Export evidence CSV',pd.DataFrame(st.session_state.rows).to_csv(index=False),'theravalue_evidence.csv','text/csv')
-    with st.expander('Extraction limitations'):st.write(st.session_state.notes)
+            from engine import passage_status
+            status=passage_status(r.get('quote'),r.get('source_text',''))
+            if status=='Exact source match':st.success(status)
+            elif status=='Partial source match':st.warning(status+' — review the complete passage.')
+            else:st.warning('Source not located automatically. Review the publication or supply a documented passage.')
+            with st.expander('Search retrieved source text'):
+                st.text(r.get('source_text','Source text unavailable; open original publication.'))
+            tag=f"{r['PMID']}_{i}_{r['outcome']}"
+            if status!='Exact source match':
+                manual=st.text_area('Correct supporting passage (verbatim)',value=r.get('manual_quote',''),key='mq'+tag)
+                reference=st.text_input('Source URL and page/table/section',value=r.get('manual_reference',''),key='mr'+tag)
+                r['manual_quote']=manual;r['manual_reference']=reference
+                manual_ok=bool(manual.strip() and reference.strip())
+            else:manual_ok=False
+            r['passage_match']=status=='Exact source match'
+            r['reviewed']=st.checkbox('I verified the value, treatment, units and interpretation against the source',value=bool(r['reviewed']),key='review'+tag,disabled=not (r['passage_match'] or manual_ok)) and (r['passage_match'] or manual_ok)
+            r['manual_verified']=bool(r['reviewed'] and manual_ok)
+            if r['outcome']=='HbA1c':
+                est=st.text_input('Reported estimand (if known)',value=str(r.get('estimand') or 'unknown'),key='est'+tag)
+                ref=st.text_input('Estimand source and supporting methods passage',value=r.get('estimand_reference',''),key='er'+tag)
+                r['estimand']=est.strip() if ref.strip() else 'unknown';r['estimand_reference']=ref
+    st.download_button('Export evidence CSV',pd.DataFrame(st.session_state.rows).drop(columns=['source_text'],errors='ignore').to_csv(index=False),'theravalue_evidence.csv','text/csv')
+    with st.expander('Evidence limitations'):
+        for pmid,notes in st.session_state.notes.items():
+            st.markdown('**PMID '+str(pmid)+'**')
+            for note in (notes if isinstance(notes,list) else [notes]):
+                if isinstance(note,str):st.write('• '+note)
+                elif isinstance(note,dict):
+                    for k,v in note.items():st.write(str(k).replace('_',' ').capitalize()+': '+str(v))
+        st.caption('Missing information is not evidence of absence. Review the full publication.')
     if st.session_state.page=='HEOR & Formulary':
         a,b=st.columns(2);a.button('← Back to retrieval',on_click=stage,args=(0,));b.button('Continue to analysis →',type='primary',on_click=stage,args=(2,))
 
 def economics():
     st.subheader('Trial-matched medication cost analysis')
-    rows=[r for r in st.session_state.rows if r['reviewed'] and r['passage_match'] and r['outcome']=='HbA1c' and r['unit']=='pp']
+    rows=[r for r in st.session_state.rows if r['reviewed'] and (r['passage_match'] or r.get('manual_verified')) and r['outcome']=='HbA1c' and r['unit']=='pp']
     pairs=[(a,b) for a in rows for b in rows if compatible(a,b)]
     if not pairs:
         st.warning('No eligible pair for incremental clinical analysis.')
-        st.write(f'{len(rows)} reviewed, passage-matched HbA1c rows. Matching trial, outcome, unit, population, follow-up and known estimand are required.')
+        st.write(f'{len(rows)} verified HbA1c rows available.')
+        if len(rows)<2:st.info('Approve at least two HbA1c results from the same trial in Verify. Correct unmatched passages there if necessary.')
+        else:st.info('Check that the two treatment arms have the same outcome definition, units, population, follow-up and documented estimand.')
         if any(str(r.get('estimand')).lower() in ('unknown','none','') for r in rows):st.info('Estimand missing: consult the full publication and analysis methods. Do not assume that unknown estimands match.')
         st.button('← Review evidence',on_click=stage,args=(1,));return
     a,b=st.selectbox('Select comparison',pairs,format_func=lambda p:f"{p[0]['arm']} vs {p[1]['arm']} · PMID {p[0]['PMID']}")
@@ -173,10 +203,28 @@ elif page=='HEOR & Formulary':
     for i,(col,name) in enumerate(zip(cols,['1 · Retrieve','2 · Verify','3 · Analyze'])):col.button(name,on_click=stage,args=(i,),type='primary' if st.session_state.stage==i else 'secondary',use_container_width=True)
     if st.session_state.stage==0:
         evidence()
-        if st.session_state.objective==2:budget()
+        if st.session_state.objective==2:
+            st.button('Skip literature search — enter budget inputs →',on_click=stage,args=(2,))
     elif st.session_state.stage==1:review()
     else:
-        economics();budget();st.button('View saved assessments →',on_click=go,args=('My Assessments',))
+        objective=st.session_state.objective
+        if objective==1:economics()
+        elif objective==2:budget()
+        else:
+            st.subheader('Clinical comparison' if objective==0 else 'Formulary evidence summary')
+            verified=[{k:v for k,v in r.items() if k!='source_text'} for r in st.session_state.rows if r.get('reviewed')]
+            if verified:
+                st.dataframe(pd.DataFrame(verified)[['PMID','arm','outcome','value','unit','measure','weeks']],hide_index=True)
+                st.caption('Study-specific findings; no cross-trial pooling or treatment ranking.')
+            else:st.info('No verified clinical findings yet. Return to Verify to review the extracted evidence.')
+            if objective==3:
+                economic_notes=st.text_area('Published economic findings and citations')
+                access_notes=st.text_area('Coverage, restrictions and access sources')
+                conclusion=st.text_area('Reviewer assessment and uncertainties')
+                if st.button('Save formulary review'):st.session_state.reports.append({'type':'Formulary review','evidence':verified,'economic_notes':economic_notes,'access_notes':access_notes,'assessment':conclusion});st.success('Saved in this session.')
+            elif verified and st.button('Save clinical comparison'):st.session_state.reports.append({'type':'Clinical comparison','evidence':verified});st.success('Saved in this session.')
+            st.button('← Review evidence',on_click=stage,args=(1,))
+        st.button('View saved assessments →',on_click=go,args=('My Assessments',))
 elif page=='Clinical Review':clinical()
 elif page=='Evidence Library':
     st.title('Evidence library');review()
