@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import json,re,itertools,copy
-from engine import search_pubmed,full_text,evidence_check,comparison,compatible,incremental,budget_model,build_query,screen,recover_passage,direct_contrast
+from engine import search_pubmed,full_text,evidence_check,comparison,compatible,incremental,budget_model,build_query,screen,recover_passage,direct_contrast,normalize_source
 from ai import ask,numeric_extract
 st.set_page_config(page_title='TheraValue',layout='wide')
-st.markdown('''<style>@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;600&display=swap'); .stApp{background:#f4f7fa} h1,h2,h3{font-family:Manrope,sans-serif!important;color:#142b40;letter-spacing:-.03em} h1{font-size:2.7rem} .block-container{max-width:1200px;padding-top:2rem} [data-testid="stSidebar"]{background:#e8eff4} .hero{background:linear-gradient(115deg,#142b40,#287f77);padding:32px;border-radius:18px;color:white;margin-bottom:24px}.hero h1{color:white;margin:0}.hero p{color:#d4e7ed} .hero{position:relative;overflow:hidden;background:radial-gradient(circle at 85% 25%,#459caa 0%,transparent 32%),linear-gradient(115deg,#142b40,#245a71);padding:42px} .orb{position:absolute;right:8%;top:15%;width:125px;height:125px;border-radius:50%;background:radial-gradient(circle at 30% 25%,#d8ffff,#49a9b5 30%,#23536e 75%);box-shadow:18px 22px 38px #102b4488;opacity:.85} .hero h1,.hero p{position:relative;z-index:1;max-width:75%} [data-testid=stVerticalBlockBorderWrapper]{border-radius:16px} [data-testid=stMetric]{background:#fff;padding:16px;border-radius:12px} .eyebrow{font-size:12px;letter-spacing:.14em;font-weight:700;color:#087f8c} .stButton button{border-radius:9px} .stApp{font-family:Inter,sans-serif} </style>''',unsafe_allow_html=True)
+st.markdown('''<style>@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@500;700;800&family=Inter:wght@400;600&display=swap'); .stApp{background:#edf4f2} h1,h2,h3{font-family:Manrope,sans-serif!important;color:#142b40;letter-spacing:-.03em} h1{font-size:2.7rem} .block-container{max-width:1200px;padding-top:2rem} [data-testid="stSidebar"]{background:#e8eff4} .hero{background:linear-gradient(115deg,#142b40,#287f77);padding:32px;border-radius:18px;color:white;margin-bottom:24px}.hero h1{color:white;margin:0}.hero p{color:#d4e7ed} .hero{position:relative;overflow:hidden;background:radial-gradient(circle at 85% 25%,#459caa 0%,transparent 32%),linear-gradient(115deg,#142b40,#245a71);padding:42px} .orb{position:absolute;right:8%;top:15%;width:125px;height:125px;border-radius:50%;background:radial-gradient(circle at 30% 25%,#d8ffff,#49a9b5 30%,#23536e 75%);box-shadow:18px 22px 38px #102b4488;opacity:.85} .hero h1,.hero p{position:relative;z-index:1;max-width:75%} [data-testid=stVerticalBlockBorderWrapper]{border-radius:16px} [data-testid=stMetric]{background:#fff;padding:16px;border-radius:12px} .eyebrow{font-size:12px;letter-spacing:.14em;font-weight:700;color:#087f8c} .stButton button{border-radius:9px} .stApp{font-family:Inter,sans-serif} </style>''',unsafe_allow_html=True)
 S=st.session_state
 for k,v in dict(page='Overview',objective=0,work={},library={},reports=[],verified_library={}).items():
     if k not in S:S[k]=v
@@ -51,7 +51,9 @@ def retrieve(w,key,default='',objective=0):
                         lookup={str(x['PMID']):x for x in result['items']}
                         for p in batch:
                             x=lookup.get(p['PMID'],{});r=x.get('relevance');
-                            if r=='Direct' and screen(p,q)[0]=='Supporting':r='Supporting'
+                            base,base_reason=screen(p,q)
+                            if base=='Direct':r='Direct';x['reason']=base_reason
+                            elif r=='Direct' and base=='Supporting':r='Supporting'
                             if r=='Supporting' and ('network meta-analysis' in p['Title'].lower()):r='Indirect'
                             p.update(relevance=r if r in ['Direct','Indirect','Supporting','Excluded','Uncertain'] else 'Uncertain',reason=str(x.get('reason','Not classified')))
                     except Exception:pass
@@ -89,9 +91,10 @@ def retrieve(w,key,default='',objective=0):
                         ft=full_text(p['PMID'])
                         if ft and ft[0]:source+='\n'+ft[0][:30000];url=ft[1];scope='Abstract + accessible paragraphs (limited)'
                     except Exception:pass
+                    source=normalize_source(source)
                     rr,nn=numeric_extract(KEY,p,source,url)
                     for r in rr:
-                        r['quote']=recover_passage(r,source)
+                        # Source passage is selected by index; no generated quote recovery.
                         if r.get('measure')=='between-arm difference' and not r.get('comparator') and r.get('comparison_group') and r['comparison_group']!='unknown':
                             r['comparator']=r['comparison_group'];r['comparator_inferred']=True
                         r.update(source_text=source,source_scope=scope,relevance=p['relevance']);r['check']=evidence_check(r);r['decision']='Pending';r['raw_extraction']=copy.deepcopy({k:v for k,v in r.items() if k!='source_text'})
@@ -113,15 +116,15 @@ def review(w,key):
             for i in indices:
                 r=rows[i]
                 with st.expander(f"{r['arm']} · {r['outcome']} · {r['value']} {r['unit']} · {r['measure']}"):
-                    st.write(r.get('quote'));st.caption(str(r.get('check'))+' · Comparator: '+str(r.get('comparator')))
+                    st.write(r.get('quote'));st.caption(str(r.get('check'))+' · Comparator: '+str(r.get('comparator'))); checked=st.checkbox('I checked the arm, dose, outcome, value, unit and comparator against this passage',key=key+'attest'+str(i))
                     if r.get('comparator_inferred'):st.warning('Comparator proposed from comparison group; verify explicitly against source.')
                     st.write('Methods: '+str(r.get('methods_quote') or 'Not extracted'))
                     x,y,z=st.columns(3)
-                    if x.button('Accept result',key=key+'accept'+str(i),disabled=r['check'] not in ['Number located','Arithmetic consistent','Manually documented'] or (r.get('measure')=='between-arm difference' and not r.get('comparator'))):r['decision']='Confirm';st.rerun()
+                    if x.button('Accept result',key=key+'accept'+str(i),disabled=not checked or r['check'] not in ['Number located','Arithmetic consistent','Manually documented'] or (r.get('measure')=='between-arm difference' and not r.get('comparator'))):r['decision']='Confirm';st.rerun()
                     if y.button('Reject result',key=key+'reject'+str(i)):r['decision']='Exclude';st.rerun()
                     if z.button('Needs correction',key=key+'correctflag'+str(i)):r['decision']='Needs correction';st.rerun()
             x,y=st.columns(2)
-            if x.button('Accept reviewed results in this study',key=key+'studyaccept'+pmid):
+            if x.button('Accept individually reviewed results',key=key+'studyaccept'+pmid,disabled=True):
                 for i in indices:
                     r=rows[i]
                     if r['decision']=='Pending' and r['check'] in ['Number located','Arithmetic consistent'] and not r.get('comparator_inferred') and (r.get('measure')!='between-arm difference' or r.get('comparator')):r['decision']='Confirm'
@@ -166,7 +169,7 @@ def clinical_results(w,key):
         kwargs={}
         if all(isinstance(r.get('ci_low'),(int,float)) and isinstance(r.get('ci_high'),(int,float)) and r['ci_low']<=r['value']<=r['ci_high'] for r in rr):
             df['upper']=df.ci_high-df.value;df['lower']=df.value-df.ci_low;kwargs=dict(error_y='upper',error_y_minus='lower')
-        st.plotly_chart(px.bar(df,x='arm',y='value',text_auto=True,title=title,labels={'value':k[2],'arm':'Treatment'},color_discrete_sequence=['#287f77'],**kwargs),key=key+'group'+str(i),use_container_width=True)
+        st.plotly_chart(px.bar(df,x='arm',y='value',text_auto=True,title=title,labels={'value':k[2],'arm':'Treatment'},color='arm',color_discrete_sequence=['#287f77','#547fa9','#8974b5','#bd864b'],**kwargs),key=key+'group'+str(i),use_container_width=True)
         st.markdown(f"[Study source]({rr[0]['source']})")
     st.caption('Study-level descriptive results only; no cross-trial pooling. Between-arm estimates are separate from baseline changes.')
     return rows,pairs
@@ -332,4 +335,4 @@ elif S.page=='My Assessments':
             data=copy.deepcopy(r);st.download_button('Export assessment',json.dumps(data,indent=2,default=str),f'assessment_{i+1}.json',key='report'+str(i));st.write('Saved research record; export includes source and review information.')
     if not S.reports:st.info('No saved assessments.')
 else:
-    st.title('Research methodology');st.caption('Version 9 · purpose-specific research workspaces');st.write('PubMed retrieval → preliminary AI relevance screening → numerical extraction → source checks → human review → deterministic analysis. Manual reference workbook is reserved for independent validation, not embedded as answers.');st.warning('Unvalidated research prototype. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')
+    st.title('Research methodology');st.caption('Version 10 · research prototype');st.graphviz_chart('digraph { rankdir=LR; node [shape=box style="rounded,filled" fillcolor="#DDEDE9" color="#287F77"]; Retrieval -> Screening -> Extraction -> Verification -> Analysis; }');st.caption('Human verification is required before analysis. Limited searches and accessible text; no automated insurance coverage, full cost-utility analysis, persistent storage or prescribing recommendations.')

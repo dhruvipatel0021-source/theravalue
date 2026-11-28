@@ -112,3 +112,39 @@ def recover_passage(row,source):
 
 def direct_contrast(r):
     return r.get('design')=='direct randomized trial' and r.get('measure')=='between-arm difference' and bool(r.get('comparator')) and bool(r.get('arm')) and r.get('weeks') and r.get('outcome') in ('HbA1c','weight') and r.get('unit') in ('pp','kg')
+
+# Normalize typography, not scientific meaning.
+def normalize_source(s):
+    import re, unicodedata
+    s=unicodedata.normalize('NFKC',str(s)).replace('−','-').replace('–','-')
+    return re.sub(r'(?<=\d)[·∙](?=\d)', '.', s)
+
+def screen(p,q):
+    import re
+    t=normalize_source(p['Title']+' '+p['Abstract']).lower(); title=p['Title'].lower(); drugs=drugs_in(q)
+    if not drugs:return 'Uncertain','Confirm eligibility for requested publication.'
+    if not all(d in drugs_in(t) for d in drugs):return 'Supporting','Not all requested therapies identified.'
+    if not re.search(r'type[ -]?(?:2|ii) diabet|\bt2dm\b',t):return 'Uncertain','Population not established.'
+    if re.search(r'meta.analysis|systematic review',title):return 'Supporting','Evidence synthesis; inspect direct and indirect estimates.'
+    randomized='randomized controlled trial' in p['Design'].lower() or bool(re.search(r'randomi[sz]',t))
+    if len(drugs)>=2 and randomized and all(d in drugs_in(title) for d in drugs) and re.search(r'\bversus\b|\bvs\.?\b|\bcompar',title):
+        return 'Direct','Candidate randomized head-to-head study; confirm requested outcomes and arms.'
+    return 'Uncertain','Confirm study design, treatment arms and requested outcomes.'
+
+def evidence_check(r):
+    import re
+    q=r.get('quote') or ''; src=r.get('source_text') or ''
+    if passage_status(q,src)!='Exact source match':return 'Source not located'
+    q=normalize_source(q).lower(); arm=normalize_source(r.get('arm') or '').lower()
+    drugs=drugs_in(arm)
+    if not drugs or not all(d in drugs_in(q) for d in drugs):return 'Arm needs review'
+    doses=re.findall(r'\b\d+(?:\.\d+)?\s*mg\b',arm)
+    if any(not re.search(r'(?<![\d.])'+re.escape(d.replace(' ',''))+r'(?!\w)',q.replace(' ','')) for d in doses):return 'Dose needs review'
+    outcome=str(r.get('outcome') or '').lower()
+    patterns={'hba1c':r'hba\s*1c|glycat\w* h[ae]emoglobin|glycated hemoglobin','weight':r'weight','nausea':r'nausea','vomiting':r'vomit','diarrhea':r'diarrh','discontinuation':r'discontinu','gastrointestinal adverse events':r'gastrointestinal'}
+    if not re.search(patterns.get(outcome,re.escape(outcome) if outcome else r'(?!)'),q):return 'Outcome needs review'
+    nums=[float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?',q)]
+    v=r['value']; signed=v in nums or (v<0 and -v in nums and bool(re.search(r'reduc|decreas|loss|lower',q)))
+    if not signed:return 'Number needs review'
+    if r.get('measure')=='between-arm difference' and (not r.get('comparator') or not all(d in drugs_in(q) for d in drugs_in(r['comparator']))):return 'Comparator needs review'
+    return 'Number located' # candidate only; individual human semantic review required
