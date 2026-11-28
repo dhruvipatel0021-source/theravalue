@@ -74,3 +74,41 @@ def budget_model(n,a,b,da,db,uptake,years):
     if min(n,da,db,years)<=0 or min(a,b)<0 or not 0<=uptake<=100:raise ValueError('Invalid scenario')
     old=n*a/da*365*years; delta=n*uptake/100*(b/db-a/da)*365*years
     return {'Current expenditure':old,'Scenario expenditure':old+delta,'Change':delta,'Switching patients':n*uptake/100}
+
+ALIASES={'tirzepatide':['tirzepatide','mounjaro','zepbound'],'semaglutide':['semaglutide','ozempic','rybelsus','wegovy'],'liraglutide':['liraglutide','victoza','saxenda'],'dulaglutide':['dulaglutide','trulicity'],'exenatide':['exenatide','byetta','bydureon'],'lixisenatide':['lixisenatide','adlyxin']}
+def drugs_in(text):
+    import re
+    return [d for d,aliases in ALIASES.items() if any(re.search(r'\b'+a+r'\b',text.lower()) for a in aliases)]
+def build_query(q):
+    import re
+    if re.fullmatch(r'\d+(?:\[PMID\])?',q.strip(),re.I):return q.split('[')[0].strip()+'[PMID]'
+    if '[' in q:return q
+    drugs=drugs_in(q)
+    if not drugs:raise ValueError('Name at least one GLP-1 therapy or enter a PubMed query.')
+    return ' AND '.join(['('+' OR '.join(a+'[tiab]' for a in ALIASES[d])+')' for d in drugs]+['("Diabetes Mellitus, Type 2"[MeSH Terms] OR "type 2 diabetes"[tiab] OR T2DM[tiab])'])
+def screen(p,q):
+    text=p['Title']+' '+p['Abstract']; t=text.lower(); design=p['Design'].lower(); drugs=drugs_in(q)
+    if '[pmid]' in q.lower() or q.strip().isdigit():return 'Uncertain','Requested publication; confirm eligibility.'
+    if not any(x in t for x in ['type 2 diabetes','type 2 diabetic','t2dm','type ii diabetes']):return 'Uncertain','Type 2 diabetes population not established in retrieved text.'
+    if not all(d in drugs_in(text) for d in drugs):return 'Supporting','Not all requested therapies identified.'
+    if any(x in t for x in ['network meta-analysis','systematic review','meta-analysis']) or 'review' in design:return 'Supporting','Evidence synthesis; may include indirect comparisons.'
+    if 'randomized controlled trial' in design or 'randomised controlled trial' in design or ('random' in t and 'trial' in t):return 'Uncertain','Potential head-to-head trial; confirm randomized arms and population.'
+    return 'Supporting','Other potentially relevant evidence; confirm design and outcomes.'
+def recover_passage(row,source):
+    import re,unicodedata
+    def norm(s):return unicodedata.normalize('NFKC',s).replace('−','-').replace('–','-')
+    v=row['value']; quote=row.get('quote') or ''
+    if passage_status(quote,source)=='Exact source match':return quote
+    # Candidate passages are not automatically verified. Require numerical match and rank by arm/outcome terms.
+    chunks=re.split(r'(?<=[.!?])\s+|\n+',source)
+    tokens=set(re.findall(r'[a-z]{4,}',(row.get('arm') or '').lower()+' '+(row.get('outcome') or '').lower()))
+    candidates=[]
+    for c in chunks:
+        nums=[float(x) for x in re.findall(r'[-+]?\d+(?:\.\d+)?',norm(c))]
+        if v in nums:
+            score=sum(t in c.lower() for t in tokens)
+            if score:candidates.append((score,c))
+    return max(candidates,key=lambda x:x[0])[1] if candidates else quote
+
+def direct_contrast(r):
+    return r.get('design')=='direct randomized trial' and r.get('measure')=='between-arm difference' and bool(r.get('comparator')) and bool(r.get('arm')) and r.get('weeks') and r.get('outcome') in ('HbA1c','weight') and r.get('unit') in ('pp','kg')
